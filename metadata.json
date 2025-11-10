@@ -1,0 +1,5 @@
+{
+  "name": "Task Pilot",
+  "description": "Task Pilot is a modern, responsive time-tracking dashboard application. It allows users to track the time they spend on various projects and tasks, set goals, and monitor their productivity over different timeframes.",
+  "requestFramePermissions": []
+}
