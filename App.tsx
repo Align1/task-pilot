@@ -33,7 +33,8 @@ import { PricingPage } from './components/PricingPage';
 
 type Page = 'dashboard' | 'settings' | 'pricing';
 
-const API_URL = '/api';
+// Use environment variable for API URL in production
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 const getFromStorage = <T,>(key: string, fallback: T): T => {
     const item = localStorage.getItem(key);
