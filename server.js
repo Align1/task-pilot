@@ -75,7 +75,29 @@ validateSecretKey();
 const SECRET_KEY = JWT_SECRET;
 
 // --- Middleware ---
-app.use(cors());
+// CORS Configuration - Allow frontend from multiple origins
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://192.168.43.183:3000',
+  'https://task-pilot-isu9v8fkk-aligndivine1-2188s-projects.vercel.app',
+  'https://task-pilot-9q6o.onrender.com'
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, Postman, etc.)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log('⚠️  CORS blocked request from:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
+
 app.use(express.json());
 
 // --- Auth Middleware ---
