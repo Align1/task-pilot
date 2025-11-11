@@ -10,15 +10,6 @@ import { Button } from './components/ui';
 import { checkAchievements } from './lib/achievements';
 import { ToastContainer, ToastContext } from './components/Toast';
 import { Auth } from './components/Auth';
-import { 
-  retryWithBackoff, 
-  getNetworkState, 
-  fetchWithTimeout, 
-  RequestQueue, 
-  getErrorMessage, 
-  logError, 
-  isRetryableError 
-} from './lib/networkUtils';
 import { registerServiceWorker, showNotification } from './lib/pwa';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { 
@@ -30,11 +21,21 @@ import {
 } from './lib/subscription';
 import { UpgradePrompt, UpgradeBanner } from './components/UpgradePrompt';
 import { PricingPage } from './components/PricingPage';
+import { supabase } from './lib/supabase';
+import {
+  getCurrentUser,
+  signOut,
+  fetchTasks as fetchTasksFromSupabase,
+  createTask as createTaskInSupabase,
+  updateTask as updateTaskInSupabase,
+  deleteTask as deleteTaskFromSupabase,
+  fetchProjects as fetchProjectsFromSupabase,
+  createProject as createProjectInSupabase,
+  updateProject as updateProjectInSupabase,
+  deleteProject as deleteProjectFromSupabase,
+} from './lib/supabaseHelpers';
 
 type Page = 'dashboard' | 'settings' | 'pricing';
-
-// Use environment variable for API URL in production
-const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 const getFromStorage = <T,>(key: string, fallback: T): T => {
     const item = localStorage.getItem(key);
@@ -215,13 +216,8 @@ const BottomNav: React.FC<{
 };
 
 const App: React.FC = () => {
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem('token'));
-  const [refreshToken, setRefreshToken] = useState<string | null>(() => localStorage.getItem('refreshToken'));
-  const [tokenExpiry, setTokenExpiry] = useState<number | null>(() => {
-    const expiry = localStorage.getItem('tokenExpiry');
-    return expiry ? parseInt(expiry) : null;
-  });
-  const [user, setUser] = useState<User | null>(() => getFromStorage('user', null));
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoadingUser, setIsLoadingUser] = useState(true);
   
   const [tasks, setTasks] = useState<Task[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -252,12 +248,10 @@ const App: React.FC = () => {
   
   // Network state
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
-  const [isRetrying, setIsRetrying] = useState<boolean>(false);
   
   // Ref to track timer interval for cleanup
   const timerIntervalRef = React.useRef<number | undefined>(undefined);
   const lastSaveTimeRef = React.useRef<number>(Date.now());
-  const requestQueueRef = React.useRef<RequestQueue>(new RequestQueue());
 
   const addToast = useCallback((message: string, type: ToastMessage['type'] = 'info') => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -268,156 +262,18 @@ const App: React.FC = () => {
     setToasts(prev => prev.filter(t => t.id !== id));
   };
 
-  const refreshAccessToken = useCallback(async (): Promise<boolean> => {
-    try {
-      if (!refreshToken) {
-        return false;
-      }
-
-      const res = await fetch(`${API_URL}/auth/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken })
-      });
-
-      if (!res.ok) {
-        return false;
-      }
-
-      const data = await res.json();
-      handleAuthSuccess(data);
-      return true;
-    } catch (error) {
-      console.error('Token refresh failed:', error);
-      return false;
-    }
-  }, [refreshToken]);
-
-  const apiFetch = useCallback(async (endpoint: string, options: RequestInit = {}, tokenRefreshAttempted = false): Promise<any> => {
-    // Check if we're online
-    if (!navigator.onLine) {
-      const error: any = new Error('No internet connection');
-      error.status = 0;
-      throw error;
-    }
-
-    const makeRequest = async (): Promise<any> => {
-      try {
-        const res = await fetchWithTimeout(`${API_URL}${endpoint}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers,
-        'Authorization': `Bearer ${token}`
-      }
-        }, 30000); // 30 second timeout
-        
-        // Handle 401 Unauthorized - token expired
-        if (res.status === 401 && !tokenRefreshAttempted) {
-          const refreshed = await refreshAccessToken();
-          if (refreshed) {
-            // Retry the request with the new token (skip retry logic for this)
-            return apiFetch(endpoint, options, true);
-          } else {
-            // Refresh failed, log out the user
-            handleLogout();
-            const error: any = new Error('Session expired. Please log in again.');
-            error.status = 401;
-            throw error;
-          }
-        }
-        
-    if (!res.ok) {
-          let errorData;
-          try {
-            errorData = await res.json();
-          } catch {
-            errorData = { message: `HTTP ${res.status}: ${res.statusText}` };
-          }
-          const error: any = new Error(errorData.message || 'API request failed');
-          error.status = res.status;
-          throw error;
-        }
-        
-    if (res.status === 204 || res.headers.get('content-length') === '0') return null;
-    return res.json();
-      } catch (error: any) {
-        // Add status to network errors
-        if (!error.status) {
-          error.status = 0;
-        }
-        throw error;
-      }
-    };
-
-    try {
-      // Show retrying indicator for retryable errors
-      const result = await retryWithBackoff(makeRequest, {
-        maxRetries: 3,
-        initialDelay: 1000,
-        maxDelay: 10000,
-        backoffMultiplier: 2
-      });
-      
-      // Clear retry indicator on success
-      if (isRetrying) {
-        setIsRetrying(false);
-      }
-      
-      return result;
-    } catch (error: any) {
-      // Log error for monitoring
-      logError(error, `API ${options.method || 'GET'} ${endpoint}`);
-      
-      // Get user-friendly message
-      const friendlyMessage = getErrorMessage(error);
-      
-      // Update error message
-      error.message = friendlyMessage;
-      
-      // Clear retry indicator
-      if (isRetrying) {
-        setIsRetrying(false);
-      }
-      
-      throw error;
-    }
-  }, [token, refreshAccessToken, isRetrying]);
-
-  // Note: handleLogout is intentionally not in deps to avoid circular dependency
-  // It's safe to call directly as it uses stable functions
-
-  const handleAuthSuccess = (data: { token: string, refreshToken: string, expiresIn: number, user: User }) => {
-    const expiryTime = Date.now() + (data.expiresIn * 1000); // Convert seconds to milliseconds
-    
-    localStorage.setItem('token', data.token);
-    localStorage.setItem('refreshToken', data.refreshToken);
-    localStorage.setItem('tokenExpiry', expiryTime.toString());
-    localStorage.setItem('user', JSON.stringify(data.user));
-    
-    setToken(data.token);
-    setRefreshToken(data.refreshToken);
-    setTokenExpiry(expiryTime);
-    setUser(data.user);
+  const handleAuthSuccess = (userData: User) => {
+    localStorage.setItem('user', JSON.stringify(userData));
+    setUser(userData);
   };
 
   const handleLogout = async () => {
     // Save active timer data before logging out
-    if (activeTaskId) {
+    if (activeTaskId && user) {
       const activeTask = tasks.find(t => t.id === activeTaskId);
-      if (activeTask && token) {
+      if (activeTask) {
         try {
-          await apiFetch(`/tasks/${activeTaskId}`, {
-            method: 'PUT',
-            body: JSON.stringify({
-              title: activeTask.title,
-              description: activeTask.description,
-              time: activeTask.time,
-              color: activeTask.color,
-              tags: activeTask.tags,
-              notes: activeTask.notes
-            })
-          });
+          await updateTaskInSupabase(activeTaskId, activeTask);
         } catch (error) {
           console.error('Failed to save timer before logout:', error);
         }
@@ -430,19 +286,16 @@ const App: React.FC = () => {
       timerIntervalRef.current = undefined;
     }
     
-    // Clear all localStorage
-    localStorage.removeItem('token');
-    localStorage.removeItem('refreshToken');
-    localStorage.removeItem('tokenExpiry');
-    localStorage.removeItem('user');
-    localStorage.removeItem('activeTaskId');
+    // Sign out from Supabase
+    await signOut();
+    
+    // Clear localStorage
+    localStorage.clear();
     
     // Reset all state
-    setToken(null);
-    setRefreshToken(null);
-    setTokenExpiry(null);
     setUser(null);
     setTasks([]);
+    setProjects([]);
     setActiveTaskId(null);
     
     addToast("You've been logged out.", 'info');
@@ -450,50 +303,81 @@ const App: React.FC = () => {
 
   // Fetch tasks with pagination
   const fetchTasks = useCallback(async (page: number = 1, limit: number = 20) => {
+    if (!user) return;
+    
     try {
-      const result = await apiFetch(`/tasks?page=${page}&limit=${limit}`);
-      const response = {
-        items: result.tasks || [],
-        pagination: result.pagination || {
-          page: 1,
-          limit: 20,
-          totalCount: 0,
-          totalPages: 0,
-          hasMore: false
-        }
-      };
+      const { tasks: newTasks, totalCount } = await fetchTasksFromSupabase(user.uid, page, limit);
       
       // Append tasks if loading more (page > 1), otherwise replace
       if (page > 1) {
-        setTasks(prev => [...prev, ...response.items]);
+        setTasks(prev => [...prev, ...newTasks]);
       } else {
-        setTasks(response.items);
+        setTasks(newTasks);
       }
       
-      return response;
+      return {
+        items: newTasks,
+        pagination: {
+          page,
+          limit,
+          totalCount,
+          totalPages: Math.ceil(totalCount / limit),
+          hasMore: page * limit < totalCount
+        }
+      };
     } catch (error: any) {
       addToast(`Could not load tasks: ${error.message}`, 'error');
-      if (error.message.toLowerCase().includes('token')) {
-        handleLogout();
-      }
       throw error;
     }
-  }, [apiFetch, addToast]);
+  }, [user, addToast]);
   
-  // Note: handleLogout is called via apiFetch, no need to include in deps
-
   // Fetch projects
   const fetchProjects = useCallback(async () => {
+    if (!user) return;
+    
     try {
-      const fetchedProjects = await apiFetch('/projects');
-      setProjects(fetchedProjects || []);
+      const fetchedProjects = await fetchProjectsFromSupabase(user.uid);
+      setProjects(fetchedProjects);
     } catch (error: any) {
       addToast(`Could not load projects: ${error.message}`, 'error');
     }
-  }, [apiFetch, addToast]);
+  }, [user, addToast]);
 
+  // Check auth on mount and listen for changes
   useEffect(() => {
-    if (token) {
+    const checkAuth = async () => {
+      try {
+        const currentUser = await getCurrentUser();
+        setUser(currentUser);
+      } catch (error) {
+        console.error('Error checking auth:', error);
+      } finally {
+        setIsLoadingUser(false);
+      }
+    };
+
+    checkAuth();
+
+    // Listen for auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_IN' && session) {
+        const currentUser = await getCurrentUser();
+        setUser(currentUser);
+      } else if (event === 'SIGNED_OUT') {
+        setUser(null);
+        setTasks([]);
+        setProjects([]);
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  // Load data when user is authenticated
+  useEffect(() => {
+    if (user) {
       const fetchInitialData = async () => {
         try {
           await Promise.all([
@@ -506,43 +390,7 @@ const App: React.FC = () => {
       };
       fetchInitialData();
     }
-  }, [token, fetchTasks, fetchProjects]);
-
-  // Automatic token refresh and expiration warning
-  useEffect(() => {
-    if (!token || !tokenExpiry) return;
-
-    const checkTokenExpiry = () => {
-      const now = Date.now();
-      const timeUntilExpiry = tokenExpiry - now;
-
-      // Refresh token 5 minutes before expiration (300000 ms)
-      if (timeUntilExpiry <= 300000 && timeUntilExpiry > 0) {
-        refreshAccessToken().catch(() => {
-          addToast('Session expiring soon. Please save your work.', 'info');
-        });
-      }
-
-      // Show warning 2 minutes before expiration (120000 ms)
-      if (timeUntilExpiry <= 120000 && timeUntilExpiry > 60000) {
-        addToast('Your session will expire in 2 minutes.', 'info');
-      }
-
-      // Token has expired
-      if (timeUntilExpiry <= 0) {
-        addToast('Your session has expired. Logging out...', 'error');
-        setTimeout(() => handleLogout(), 2000);
-      }
-    };
-
-    // Check immediately
-    checkTokenExpiry();
-
-    // Check every 30 seconds
-    const interval = setInterval(checkTokenExpiry, 30000);
-
-    return () => clearInterval(interval);
-  }, [token, tokenExpiry, refreshAccessToken, addToast]);
+  }, [user, fetchTasks, fetchProjects]);
 
   useEffect(() => {
     setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone);
@@ -569,21 +417,12 @@ const App: React.FC = () => {
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
-      addToast('Connection restored! Syncing data...', 'success');
-      
-      // Process queued requests
-      if (requestQueueRef.current.size() > 0) {
-        requestQueueRef.current.processQueue().then(() => {
-          addToast('All pending changes synced successfully!', 'success');
-        }).catch(() => {
-          addToast('Some changes could not be synced. Please try again.', 'error');
-        });
-      }
+      addToast('Connection restored!', 'success');
     };
 
     const handleOffline = () => {
       setIsOnline(false);
-      addToast('You are offline. Changes will be saved locally.', 'info');
+      addToast('You are offline. Changes will be saved when connection is restored.', 'info');
     };
 
     window.addEventListener('online', handleOnline);
@@ -648,12 +487,23 @@ const App: React.FC = () => {
       // Persist active task ID
       localStorage.setItem('activeTaskId', activeTaskId);
       
-      // Start new interval
+      // Start new interval - COUNT DOWN
       timerIntervalRef.current = window.setInterval(() => {
         setTasks(prevTasks =>
-          prevTasks.map(task =>
-            task.id === activeTaskId ? { ...task, time: (task.time || 0) + 1 } : task
-          )
+          prevTasks.map(task => {
+            if (task.id === activeTaskId) {
+              const newTime = Math.max(0, (task.time || 0) - 1);
+              
+              // Stop timer when it reaches 0
+              if (newTime === 0 && task.time !== 0) {
+                setActiveTaskId(null);
+                addToast(`Timer completed for "${task.title}"!`, 'success');
+              }
+              
+              return { ...task, time: newTime };
+            }
+            return task;
+          })
         );
       }, 1000);
     } else {
@@ -668,11 +518,11 @@ const App: React.FC = () => {
         timerIntervalRef.current = undefined;
       }
     };
-  }, [activeTaskId]);
+  }, [activeTaskId, addToast]);
 
   // Periodic save of active timer to server (every 30 seconds)
   useEffect(() => {
-    if (!activeTaskId || !token) return;
+    if (!activeTaskId || !user) return;
 
     const saveTimerToServer = async () => {
       const now = Date.now();
@@ -685,17 +535,7 @@ const App: React.FC = () => {
       if (!activeTask) return;
 
       try {
-        await apiFetch(`/tasks/${activeTaskId}`, {
-          method: 'PUT',
-          body: JSON.stringify({
-            title: activeTask.title,
-            description: activeTask.description,
-            time: activeTask.time,
-            color: activeTask.color,
-            tags: activeTask.tags,
-            notes: activeTask.notes
-          })
-        });
+        await updateTaskInSupabase(activeTaskId, activeTask);
         lastSaveTimeRef.current = now;
       } catch (error) {
         console.error('Failed to save timer to server:', error);
@@ -710,7 +550,7 @@ const App: React.FC = () => {
     const saveInterval = setInterval(saveTimerToServer, 30000);
 
     return () => clearInterval(saveInterval);
-  }, [activeTaskId, tasks, token, apiFetch]);
+  }, [activeTaskId, tasks, user]);
 
   useEffect(() => {
     if (tasks.length > 0) {
@@ -767,6 +607,8 @@ const App: React.FC = () => {
   };
 
   const handleSaveTask = async (taskData: Omit<Task, 'id' | 'createdAt'>, id?: string) => {
+    if (!user) return;
+
     // Check limit for new tasks
     if (!id && !checkTaskLimit()) {
       return;
@@ -774,11 +616,11 @@ const App: React.FC = () => {
 
     try {
       if (id) {
-        const updatedTask = await apiFetch(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(taskData) });
+        const updatedTask = await updateTaskInSupabase(id, taskData as Partial<Task>);
         setTasks(tasks.map(t => t.id === id ? updatedTask : t));
         addToast(`Task "${taskData.title}" updated!`, 'success');
       } else {
-        const newTask = await apiFetch('/tasks', { method: 'POST', body: JSON.stringify(taskData) });
+        const newTask = await createTaskInSupabase(user.uid, taskData as Partial<Task>);
         // Add new task to the top of the list (optimistic update)
         setTasks([newTask, ...tasks]);
         addToast(`Task "${taskData.title}" created!`, 'success');
@@ -804,6 +646,16 @@ const App: React.FC = () => {
     setUpgradePromptData(null);
   };
 
+  const handleToggleTimer = (taskId: string) => {
+    // If clicking the same task, pause/stop it
+    if (activeTaskId === taskId) {
+      setActiveTaskId(null);
+    } else {
+      // Start timer on new task
+      setActiveTaskId(taskId);
+    }
+  };
+
   const handleDeleteTask = async (taskId: string) => {
     try {
       // Stop timer if deleting the active task
@@ -816,7 +668,7 @@ const App: React.FC = () => {
         localStorage.removeItem('activeTaskId');
       }
 
-      await apiFetch(`/tasks/${taskId}`, { method: 'DELETE' });
+      await deleteTaskFromSupabase(taskId);
       setTasks(tasks.filter(t => t.id !== taskId));
       addToast('Task deleted.', 'success');
     } catch (error: any) {
@@ -876,6 +728,8 @@ const App: React.FC = () => {
   };
 
   const handleSaveProject = async (projectData: Omit<Project, 'id' | 'createdAt' | 'updatedAt' | 'taskCount' | 'totalTime'>, id?: string) => {
+    if (!user) return;
+
     // Check limit for new projects
     if (!id && !checkProjectLimit()) {
       return;
@@ -883,11 +737,11 @@ const App: React.FC = () => {
 
     try {
       if (id) {
-        const updatedProject = await apiFetch(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(projectData) });
+        const updatedProject = await updateProjectInSupabase(id, projectData as Partial<Project>);
         setProjects(projects.map(p => p.id === id ? updatedProject : p));
         addToast(`Project "${projectData.name}" updated!`, 'success');
       } else {
-        const newProject = await apiFetch('/projects', { method: 'POST', body: JSON.stringify(projectData) });
+        const newProject = await createProjectInSupabase(user.uid, projectData as Partial<Project>);
         setProjects([newProject, ...projects]);
         addToast(`Project "${projectData.name}" created!`, 'success');
       }
@@ -898,7 +752,7 @@ const App: React.FC = () => {
 
   const handleDeleteProject = async (projectId: string) => {
     try {
-      await apiFetch(`/projects/${projectId}`, { method: 'DELETE' });
+      await deleteProjectFromSupabase(projectId);
       setProjects(projects.filter(p => p.id !== projectId));
       // Refresh tasks to update projectId references
       await fetchTasks(1, 20);
@@ -908,7 +762,15 @@ const App: React.FC = () => {
     }
   };
 
-  if (!token || !user) {
+  if (isLoadingUser) {
+    return (
+      <div className="min-h-screen w-full flex items-center justify-center bg-slate-950">
+        <div className="text-slate-400">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!user) {
     return (
       <ToastContext.Provider value={{ addToast }}>
         <div className={`font-sans ${theme === 'dark' ? 'dark' : ''}`}>
@@ -930,7 +792,7 @@ const App: React.FC = () => {
           timeframe={timeframe} 
           setTimeframe={setTimeframe} 
           activeTaskId={activeTaskId} 
-          onToggleTimer={setActiveTaskId} 
+          onToggleTimer={handleToggleTimer} 
           onEditTask={handleOpenTaskDialog} 
           onDeleteTask={handleDeleteTask}
           onLoadMore={fetchTasks}
@@ -950,34 +812,16 @@ const App: React.FC = () => {
 
   // Network status indicator component
   const NetworkStatusIndicator = () => {
-    if (isOnline && !isRetrying) return null;
+    if (isOnline) return null;
 
     return (
       <div className="fixed bottom-20 md:bottom-4 left-4 right-4 md:left-auto md:right-4 md:w-auto z-50 animate-fade-in-up">
-        <div className={`flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border ${
-          !isOnline 
-            ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-800 dark:text-red-200'
-            : 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-200'
-        }`}>
-          {!isOnline ? (
-            <>
-              <Icon name="XCircle" className="w-5 h-5 flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <p className="font-semibold text-sm">You're offline</p>
-                <p className="text-xs opacity-80">Changes will be saved when reconnected</p>
-              </div>
-            </>
-          ) : isRetrying ? (
-            <>
-              <div className="w-5 h-5 flex-shrink-0">
-                <div className="animate-spin rounded-full h-5 w-5 border-2 border-current border-t-transparent"></div>
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="font-semibold text-sm">Retrying...</p>
-                <p className="text-xs opacity-80">Please wait</p>
-              </div>
-            </>
-          ) : null}
+        <div className="flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-800 dark:text-red-200">
+          <Icon name="XCircle" className="w-5 h-5 flex-shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold text-sm">You're offline</p>
+            <p className="text-xs opacity-80">Changes will be saved when reconnected</p>
+          </div>
         </div>
       </div>
     );

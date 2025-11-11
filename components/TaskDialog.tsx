@@ -191,20 +191,21 @@ export const TaskDialog: React.FC<TaskDialogProps> = ({ isOpen, onClose, onSave,
           <Label htmlFor="tags">Tags (comma-separated)</Label>
           <Input id="tags" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="e.g., UI, Design" />
         </div>
-        <div className="grid grid-cols-1 gap-1">
-            <Label>Color</Label>
-            <div className="flex flex-wrap gap-2 mt-1">
+        <fieldset className="grid grid-cols-1 gap-1">
+            <legend className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-slate-700 dark:text-slate-300 mb-1">Color</legend>
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Task color selection">
                 {TASK_COLORS.map(c => (
                     <button
                         key={c}
                         type="button"
                         aria-label={`Select color ${c.split('-')[0]}`}
+                        aria-pressed={color === c}
                         onClick={() => setColor(c)}
                         className={`w-7 h-7 rounded-full ${bgColorMap[c] || 'bg-slate-500'} transition-transform transform hover:scale-110 focus:outline-none ${color === c ? 'ring-2 ring-offset-2 ring-indigo-500 dark:ring-offset-slate-900' : ''}`}
                     />
                 ))}
             </div>
-        </div>
+        </fieldset>
         <div className="grid grid-cols-1 gap-1">
             <Label htmlFor="notes">Notes (optional)</Label>
             <textarea

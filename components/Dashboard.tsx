@@ -352,11 +352,14 @@ export const Dashboard: React.FC<DashboardProps> = (props) => {
                                 <Icon name="Search" className="w-5 h-5 text-slate-400" />
                             </span>
                             <Input
+                                id="task-search"
+                                name="task-search"
                                 type="text"
                                 placeholder="Search by title or description..."
                                 value={searchQuery}
                                 onChange={e => setSearchQuery(e.target.value)}
                                 className="pl-10 pr-10"
+                                autoComplete="off"
                             />
                             {searchQuery && (
                                 <button

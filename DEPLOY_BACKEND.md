@@ -113,29 +113,6 @@ const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 ---
 
-## ⚡ Quick Alternative: Use Render (Also Free)
-
-### Render Deployment:
-
-1. Go to: https://render.com
-2. Click "New +" → "Web Service"
-3. Connect GitHub or upload
-4. Configure:
-   ```
-   Name: task-pilot-api
-   Environment: Node
-   Build Command: npm install
-   Start Command: node server.js
-   ```
-5. Add environment variables:
-   ```
-   JWT_SECRET=<your-secret>
-   ```
-6. Click "Create Web Service"
-
-**Result**: Backend URL like `https://task-pilot-api.onrender.com`
-
----
 
 ## 🎯 Simplest Solution (For Testing APK)
 

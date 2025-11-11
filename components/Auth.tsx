@@ -3,9 +3,10 @@ import { Button, Card, Input, Label } from './ui';
 import { Icon } from './icons';
 import { useToast } from './Toast';
 import { User } from '../types';
+import { supabase } from '../lib/supabase';
 
 interface AuthProps {
-    onAuthSuccess: (data: { token: string, refreshToken: string, expiresIn: number, user: User }) => void;
+    onAuthSuccess: (user: User) => void;
 }
 
 export const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
@@ -21,27 +22,114 @@ export const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
         e.preventDefault();
         setIsLoading(true);
 
-        const url = `/api/auth/${isLogin ? 'login' : 'signup'}`;
-        const body = isLogin ? { email, password } : { email, password, displayName };
-
         try {
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            
-            const data = await response.json();
+            if (isLogin) {
+                // Login with Supabase
+                const { data, error } = await supabase.auth.signInWithPassword({
+                    email,
+                    password,
+                });
 
-            if (!response.ok) {
-                throw new Error(data.message || 'Something went wrong');
+                if (error) throw error;
+                if (!data.user) throw new Error('No user returned');
+
+                // Get user profile
+                const { data: profile, error: profileError } = await supabase
+                    .from('profiles')
+                    .select('*')
+                    .eq('id', data.user.id)
+                    .single();
+
+                if (profileError) throw profileError;
+
+                const user: User = {
+                    uid: profile.id,
+                    email: profile.email,
+                    displayName: profile.display_name,
+                    photoURL: profile.photo_url || `https://picsum.photos/seed/${profile.display_name}/100`,
+                    subscription: {
+                        tier: profile.subscription_tier as any,
+                        status: profile.subscription_status as any,
+                    },
+                };
+
+                addToast(`Welcome back, ${user.displayName}!`, 'success');
+                onAuthSuccess(user);
+            } else {
+                // Sign up with Supabase
+                const { data, error } = await supabase.auth.signUp({
+                    email,
+                    password,
+                    options: {
+                        data: {
+                            displayName,
+                            photoURL: `https://picsum.photos/seed/${encodeURIComponent(displayName)}/100`,
+                        },
+                    },
+                });
+
+                if (error) throw error;
+                if (!data.user) throw new Error('No user returned');
+
+                // Profile is automatically created by database trigger
+                // Wait a moment for trigger to complete
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                // Get user profile
+                const { data: profile, error: profileError } = await supabase
+                    .from('profiles')
+                    .select('*')
+                    .eq('id', data.user.id)
+                    .single();
+
+                if (profileError) {
+                    // Profile might not exist yet, create it manually
+                    const { data: newProfile, error: createError } = await supabase
+                        .from('profiles')
+                        .insert({
+                            id: data.user.id,
+                            email,
+                            display_name: displayName,
+                            photo_url: `https://picsum.photos/seed/${encodeURIComponent(displayName)}/100`,
+                        })
+                        .select()
+                        .single();
+
+                    if (createError) throw createError;
+                    
+                    const user: User = {
+                        uid: newProfile.id,
+                        email: newProfile.email,
+                        displayName: newProfile.display_name,
+                        photoURL: newProfile.photo_url || `https://picsum.photos/seed/${newProfile.display_name}/100`,
+                        subscription: {
+                            tier: newProfile.subscription_tier as any,
+                            status: newProfile.subscription_status as any,
+                        },
+                    };
+
+                    addToast(`Welcome aboard, ${user.displayName}!`, 'success');
+                    onAuthSuccess(user);
+                } else {
+                    const user: User = {
+                        uid: profile.id,
+                        email: profile.email,
+                        displayName: profile.display_name,
+                        photoURL: profile.photo_url || `https://picsum.photos/seed/${profile.display_name}/100`,
+                        subscription: {
+                            tier: profile.subscription_tier as any,
+                            status: profile.subscription_status as any,
+                        },
+                    };
+
+                    addToast(`Welcome aboard, ${user.displayName}!`, 'success');
+                    onAuthSuccess(user);
+                }
             }
-
-            addToast(`Welcome ${isLogin ? '' : 'aboard'}, ${data.user.displayName}!`, 'success');
-            onAuthSuccess(data);
-
         } catch (error: any) {
-            addToast(error.message, 'error');
+            console.error('Auth error:', error);
+            const errorMessage = error.message || error.error_description || 'Authentication failed';
+            addToast(errorMessage, 'error');
         } finally {
             setIsLoading(false);
         }
